@@ -19,6 +19,7 @@
 using namespace std;
 
 int child_pid = -1;
+uintptr_t text_section_end = 0;
 uintptr_t entry_point = 0;
 uintptr_t cur_addr;
 vector<uintptr_t> breakpoints;
@@ -26,17 +27,12 @@ vector<long> original_data;
 cs_insn *instructions;
 size_t inst_count;
 bool loaded = false;
-
-void print_prompt() {
-    printf("(sdb) ");
-}
+bool is_entering = true; 
+uintptr_t bp = 0; 
+int track = 0; 
 
 void print_load_program() {
     printf("** please load a program first.\n");
-}
-
-void print_out_of_range() {
-    printf("** the address is out of the range of the text section.\n");
 }
 
 void print_program_terminated() {
@@ -70,6 +66,27 @@ uintptr_t get_entry_point(const string &path) {
     return ehdr.e_entry;
 }
 
+void get_text_section_end(const char* program_path) {
+    int fd = open(program_path, O_RDONLY);
+
+    Elf64_Ehdr ehdr;
+    Elf64_Shdr shdr;
+    read(fd, &ehdr, sizeof(ehdr));
+    lseek(fd, ehdr.e_shoff, SEEK_SET);
+
+    for (int i = 0; i < ehdr.e_shnum; i++) {
+        read(fd, &shdr, sizeof(shdr));
+        if (shdr.sh_type == SHT_PROGBITS && (shdr.sh_flags & SHF_EXECINSTR)) {
+            close(fd);
+            text_section_end = shdr.sh_addr + shdr.sh_size;
+            return; 
+        }
+    }
+    close(fd);
+    fprintf(stderr, "Executable section not found\n");
+    exit(EXIT_FAILURE);
+}
+
 void save_instructions(uintptr_t addr) {
     csh handle;
     uint8_t code[15 * 20];
@@ -101,7 +118,7 @@ void disassemble(uintptr_t addr, int length) {
     }
 
     // printf("Code bytes at %lx:\n", addr);
-    // for (int i = 0; i < sizeof(code); i++) {
+    // for (size_t i = 0; i < sizeof(code); i++) {
     //     printf("%02x ", code[i]);
     // } printf("\n");
 
@@ -109,10 +126,25 @@ void disassemble(uintptr_t addr, int length) {
     if (count > 0) {
         for (size_t i = 0; i < count; i++) {
             if ((int)i == length) break;
-            if (insn[i].size == 2 && insn[i].bytes[0] == 0 && insn[i].bytes[1] == 0) {
-                print_out_of_range();
+
+            bool found = false; 
+            for (size_t j = 0; j<inst_count; j++){
+                if (instructions[j].address == insn[i].address){
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                length++;
+                continue; 
+            }
+
+            if (insn[i].address >= text_section_end) {
+                printf("** the address is out of the range of the text section.\n");
                 break;
             }
+            
             if (insn[i].size == 1 && insn[i].bytes[0] == 0xcc) {
                 for (size_t j = 0; j < inst_count; j++) {
                     if (instructions[j].address == insn[i].address) {
@@ -120,7 +152,7 @@ void disassemble(uintptr_t addr, int length) {
                         for (int k = 0; k < instructions[j].size; k++) {
                             printf("%02x ", instructions[j].bytes[k]);
                         }
-                        for (int k = instructions[j].size; k < 15; k++) {
+                        for (int k = instructions[j].size; k < 12; k++) {
                             printf("   ");
                         }
                         printf("%-10s %s\n", instructions[j].mnemonic, instructions[j].op_str);
@@ -137,7 +169,7 @@ void disassemble(uintptr_t addr, int length) {
             for (int j = 0; j < insn[i].size; j++) {
                 printf("%02x ", insn[i].bytes[j]);
             }
-            for (int j = insn[i].size; j < 15; j++) {
+            for (int j = insn[i].size; j < 12; j++) {
                 printf("   ");
             }
             printf("%-10s %s\n", insn[i].mnemonic, insn[i].op_str);
@@ -165,6 +197,7 @@ void handle_load(const string &path) {
         error("failed to get entry point");
         return;
     }
+    get_text_section_end(path.c_str());
 
     child_pid = fork();
     if (child_pid == 0) {
@@ -175,10 +208,10 @@ void handle_load(const string &path) {
     } else {
         waitpid(child_pid, nullptr, 0);
         printf("** program '%s' loaded. entry point 0x%lx.\n", path.c_str(), entry_point);
+        save_instructions(entry_point);
         disassemble(entry_point, 5);
+        loaded = true;
     }
-    save_instructions(entry_point);
-    loaded = true;
 }
 
 long set_breakpoint(uintptr_t addr) {
@@ -194,51 +227,78 @@ void handle_break(uintptr_t addr) {
     original_data.push_back(original);
 }
 
+void delete_break(size_t index) {
+    if (index >= breakpoints.size() || breakpoints[index] == 0) {
+        printf("** breakpoint %ld does not exist.\n", index);
+        return;
+    }
+    breakpoints[index] = 0; 
+    long cur = ptrace(PTRACE_PEEKDATA, child_pid, breakpoints[index], NULL);
+    ptrace(PTRACE_POKEDATA, child_pid, breakpoints[index], (cur & ~0xff) | original_data[index]);
+    printf("** delete breakpoint %ld.\n", index);
+}
+
 void handle_info_break() {
     if (breakpoints.empty()) {
         cout << "** no breakpoints." << endl;
         return;
     }
 
-    cout << "Num \t Address" << endl;
+    cout << "Num\tAddress" << endl;
     for (size_t i = 0; i < breakpoints.size(); i++) {
-        cout << i << "\t 0x" << hex << breakpoints[i] << endl;
+        if (breakpoints[i] == 0) continue; 
+        cout << i << "\t0x" << hex << breakpoints[i] << endl;
     }
-}
-
-void handle_delete_break(size_t index) {
-    if (index >= breakpoints.size()) {
-        printf("** breakpoint %ld does not exist.\n", index);
-        return;
-    }
-    breakpoints.erase(breakpoints.begin() + index);
-    printf("** delete breakpoint %ld.\n", index);
 }
 
 void process_breakpoint(uintptr_t rip) {
-    printf("** hit a breakpoint at 0x%lx\n", rip);
+    printf("** hit a breakpoint at 0x%lx.\n", rip);
 
     struct user_regs_struct regs;
     ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
 
+    // find original instruction at breakpoint address and restore it
     for (size_t i = 0; i < inst_count; i++) {
         if (instructions[i].address == rip) {
-            if (instructions[i].size != 1) {
-                regs.rip++;
-                ptrace(PTRACE_SETREGS, child_pid, NULL, &regs);
-                break;
-            }
+            long cur_binary = ptrace(PTRACE_PEEKDATA, child_pid, rip, NULL);
+            ptrace(PTRACE_POKEDATA, child_pid, rip, (cur_binary & ~0xff) | instructions[i].bytes[0]);
+            ptrace(PTRACE_SINGLESTEP, child_pid, NULL, NULL);
+            waitpid(child_pid, NULL, 0);
+            track = 1; 
+            bp = rip;  
+            regs.rip = rip; 
+
+            // cout << "RIP: " << hex << regs.rip << endl;
+            ptrace(PTRACE_SETREGS, child_pid, NULL, &regs);
+            
+            break; 
+        }
+    }
+    // cout << "RIP: " << hex << regs.rip << endl;
+}
+
+void check_breakpoint(){
+    if (bp) {
+        if (track) track--; 
+        else {
+            set_breakpoint(bp);
+            bp = 0; 
         }
     }
 }
 
 void handle_patch(uintptr_t addr, uint64_t value, size_t len) {
+    uint64_t mask = (1ULL << (len * 8)) - 1; 
+    long cur = ptrace(PTRACE_PEEKDATA, child_pid, addr, NULL);
+    value = (cur & ~mask) | value;
     ptrace(PTRACE_POKEDATA, child_pid, addr, value);
-    cout << len << endl;
+    save_instructions(entry_point); 
     printf("** patch memory at address 0x%lx.\n", addr);
 }
 
 void handle_si() {
+    check_breakpoint();
+
     ptrace(PTRACE_SINGLESTEP, child_pid, NULL, NULL);
     waitpid(child_pid, NULL, 0);
 
@@ -246,7 +306,7 @@ void handle_si() {
     ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
 
     uintptr_t rip = regs.rip;
-    cout << "RIP: " << hex << rip << endl;
+    // cout << "RIP: " << hex << rip << endl;
     auto it = find(breakpoints.begin(), breakpoints.end(), rip);
     if (it != breakpoints.end()) {
         process_breakpoint(rip);
@@ -256,41 +316,51 @@ void handle_si() {
 }
 
 void handle_cont() {
-    // Continue the execution of the child process
-    if (ptrace(PTRACE_CONT, child_pid, NULL, NULL) == -1) {
-        perror("ptrace");
-        return;
-    }
-
-    // Wait for the child process to stop
+    check_breakpoint();
+    
+    ptrace(PTRACE_CONT, child_pid, NULL, NULL);
     int status;
-    if (waitpid(child_pid, &status, 0) == -1) {
-        perror("waitpid");
-        return;
-    }
+    waitpid(child_pid, &status, 0);
 
     // Check if the child process hit a breakpoint
     if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
         // Get the current instruction pointer
         struct user_regs_struct regs;
         ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
-        uintptr_t rip = regs.rip;
 
-        cout << "RIP: " << hex << regs.rip << endl;
-        auto it = find(breakpoints.begin(), breakpoints.end(), rip);
-        if (it != breakpoints.end()) {
-            process_breakpoint(rip);
-            disassemble(rip, 5);
-        }
+        // cout << "RIP: " << hex << regs.rip << endl;
+        process_breakpoint(regs.rip - 1);
+        disassemble(regs.rip - 1, 5);
 
-        // // Check if the instruction pointer is at the breakpoint address
-        // for (size_t i = 0; i < breakpoints.size(); i++) {
-        //     if (regs.rip == breakpoints[i] + 1) {
-        //         process_breakpoint(breakpoints[i]);
-        //         disassemble(breakpoints[i], 5);
-        //         break;
-        //     }
-        // }
+    } else if (WIFEXITED(status)) {
+        print_program_terminated();
+    }
+}
+
+void handle_syscall() {
+    check_breakpoint();
+
+    int status;
+    ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
+    waitpid(child_pid, &status, 0);
+
+    if (WIFSTOPPED(status)) {
+        struct user_regs_struct regs;
+        ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
+        // cout << "RIP: " << hex << regs.rip << endl;
+        // cout << "regs.orig_rax: " << regs.orig_rax << endl;
+        if (regs.orig_rax > 300) { // breakpoint
+            process_breakpoint(regs.rip - 1); 
+            disassemble(regs.rip - 1, 5);
+        } else if (is_entering){ // entering syscall
+            printf("** enter a syscall(%lld) at 0x%llx.\n", regs.orig_rax, regs.rip - 2);
+            disassemble(regs.rip - 2, 5);
+            is_entering = false;
+        } else { // leaving syscall
+            printf("** leave a syscall(%lld) = %lld at 0x%llx.\n", regs.orig_rax, regs.rax, regs.rip - 2);
+            disassemble(regs.rip - 2, 5);
+            is_entering = true;
+        } 
     } else if (WIFEXITED(status)) {
         print_program_terminated();
     }
@@ -306,10 +376,6 @@ void handle_info_reg() {
     printf("$r9  0x%016llx    $r10 0x%016llx    $r11 0x%016llx\n", regs.r9, regs.r10, regs.r11);
     printf("$r12 0x%016llx    $r13 0x%016llx    $r14 0x%016llx\n", regs.r12, regs.r13, regs.r14);
     printf("$r15 0x%016llx    $rip 0x%016llx    $eflags 0x%016llx\n", regs.r15, regs.rip, regs.eflags);
-}
-
-void handle_syscall() {
-    // Implement syscall functionality similar to si and cont.
 }
 
 void handle_command(const string &cmd) {
@@ -382,7 +448,7 @@ void handle_command(const string &cmd) {
             return;
         }
         size_t index = stoul(tokens[1]);
-        handle_delete_break(index);
+        delete_break(index);
     } else if (command == "patch") {
         if (!loaded) {
             print_load_program();
@@ -414,7 +480,7 @@ int main(int argc, char *argv[]) {
     }
 
     while (true) {
-        print_prompt();
+        printf("(sdb) ");
 
         string cmd;
         getline(cin, cmd);
