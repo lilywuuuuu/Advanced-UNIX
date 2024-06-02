@@ -1,0 +1,32 @@
+--- 6.out	2024-06-02 12:40:54.190630765 +0000
++++ 6.ans	2024-06-02 12:34:06.058407463 +0000
+@@ -15,7 +15,13 @@
+       401135: 0f 05                               syscall    
+ (sdb) cont
+ guess a number > 1
++** hit a breakpoint at 0x401128.
++      401128: b8 01 00 00 00                  	mov       eax, 1
++      40112d: 0f 05                           	syscall   
++      40112f: c3                              	ret       
++      401130: b8 00 00 00 00                  	mov       eax, 0
++      401135: 0f 05                           	syscall   
++(sdb) cont
+ 
+ no no no
+ ** the target program terminated.
+-(sdb) cont
+
+
+--- 7.out	2024-06-02 12:40:54.358630899 +0000
++++ 7.ans	2024-06-02 12:15:27.706049809 +0000
+@@ -28,7 +28,7 @@
+       401040: 0f 05                               syscall    
+ ** the address is out of the range of the text section.
+ (sdb) syscall
+-** leave a syscall(60) = -38 at 0x401040.
++** enter a syscall(60) at 0x401040.
+       401040: 0f 05                               syscall    
+ ** the address is out of the range of the text section.
+ (sdb) syscall
+
+
