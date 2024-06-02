@@ -294,6 +294,12 @@ void handle_patch(uintptr_t addr, uint64_t value, size_t len) {
     ptrace(PTRACE_POKEDATA, child_pid, addr, value);
     save_instructions(entry_point); 
     printf("** patch memory at address 0x%lx.\n", addr);
+    // check if the patch was a breakpoint
+    for (size_t i = 0; i < len; i++) {
+        if (((cur >> (i * 8)) & 0xFF) == 0xCC) {
+            set_breakpoint(addr + i); 
+        }
+    }
 }
 
 void handle_si() {
