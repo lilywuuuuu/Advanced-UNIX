@@ -1,6 +1,0 @@
-./sdb ./guess
-break 0x401128
-cont
-cont
-1
-cont

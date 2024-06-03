@@ -1,4 +1,4 @@
-./sdb ./hello
+../sdb ./hello
 break 0x401005
 break 40102b
 info break

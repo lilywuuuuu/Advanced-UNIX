@@ -24,12 +24,11 @@ uintptr_t entry_point = 0;
 uintptr_t cur_addr;
 vector<uintptr_t> breakpoints;
 vector<long> original_data;
-cs_insn *instructions;
 size_t inst_count;
 bool loaded = false;
-bool is_entering = true; 
-uintptr_t bp = 0; 
-int track = 0; 
+bool is_entering = true;
+uintptr_t bp = 0;
+int track = 0;
 
 void print_load_program() {
     printf("** please load a program first.\n");
@@ -66,7 +65,7 @@ uintptr_t get_entry_point(const string &path) {
     return ehdr.e_entry;
 }
 
-void get_text_section_end(const char* program_path) {
+void get_text_section_end(const char *program_path) {
     int fd = open(program_path, O_RDONLY);
 
     Elf64_Ehdr ehdr;
@@ -79,28 +78,12 @@ void get_text_section_end(const char* program_path) {
         if (shdr.sh_type == SHT_PROGBITS && (shdr.sh_flags & SHF_EXECINSTR)) {
             close(fd);
             text_section_end = shdr.sh_addr + shdr.sh_size;
-            return; 
+            return;
         }
     }
     close(fd);
     fprintf(stderr, "Executable section not found\n");
     exit(EXIT_FAILURE);
-}
-
-void save_instructions(uintptr_t addr) {
-    csh handle;
-    uint8_t code[15 * 20];
-
-    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
-        return;
-    }
-
-    for (int i = 0; i < 15 * 20; i += 8) {
-        *(long *)(code + i) = ptrace(PTRACE_PEEKDATA, child_pid, addr + i, NULL);
-    }
-
-    inst_count = cs_disasm(handle, code, sizeof(code), addr, 0, &instructions);
-    cs_close(&handle);
 }
 
 void disassemble(uintptr_t addr, int length) {
@@ -122,49 +105,33 @@ void disassemble(uintptr_t addr, int length) {
     //     printf("%02x ", code[i]);
     // } printf("\n");
 
-    count = cs_disasm(handle, code, sizeof(code), addr, length * 2, &insn);
-    if (count > 0) {
-        for (size_t i = 0; i < count; i++) {
-            if ((int)i == length) break;
+    // cs_opt_skipdata skipdata = {
+    //     .mnemonic = "db",
+    //     .callback = NULL,
+    //     .user_data = NULL
+    // };
+    // cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+    // cs_option(handle, CS_OPT_SKIPDATA, CS_OPT_ON);
+    // cs_option(handle, CS_OPT_SKIPDATA_SETUP, (size_t)&skipdata);
 
-            bool found = false; 
-            for (size_t j = 0; j<inst_count; j++){
-                if (instructions[j].address == insn[i].address){
-                    found = true;
-                    break;
+    for (size_t i = 0; i<sizeof(code); i++){
+        if (code[i] == 0xcc){
+            for (size_t j = 0; j<breakpoints.size(); j++){
+                if (breakpoints[j] == addr + i){
+                    code[i] = original_data[j] & 0xff;
                 }
             }
+        }
+    }
 
-            if (!found) {
-                length++;
-                continue; 
-            }
-
+    count = cs_disasm(handle, code, sizeof(code), addr, length, &insn);
+    if (count > 0) {
+        for (size_t i = 0; i < count; i++) { 
             if (insn[i].address >= text_section_end) {
                 printf("** the address is out of the range of the text section.\n");
                 break;
             }
-            
-            if (insn[i].size == 1 && insn[i].bytes[0] == 0xcc) {
-                for (size_t j = 0; j < inst_count; j++) {
-                    if (instructions[j].address == insn[i].address) {
-                        printf("      %lx: ", insn[i].address);
-                        for (int k = 0; k < instructions[j].size; k++) {
-                            printf("%02x ", instructions[j].bytes[k]);
-                        }
-                        for (int k = instructions[j].size; k < 12; k++) {
-                            printf("   ");
-                        }
-                        printf("%-10s %s\n", instructions[j].mnemonic, instructions[j].op_str);
-                        if (instructions[j].size != 1) {
-                            i++;
-                            length++;
-                        }
-                        break;
-                    }
-                }
-                continue;
-            }
+
             printf("      %lx: ", insn[i].address);
             for (int j = 0; j < insn[i].size; j++) {
                 printf("%02x ", insn[i].bytes[j]);
@@ -208,7 +175,6 @@ void handle_load(const string &path) {
     } else {
         waitpid(child_pid, nullptr, 0);
         printf("** program '%s' loaded. entry point 0x%lx.\n", path.c_str(), entry_point);
-        save_instructions(entry_point);
         disassemble(entry_point, 5);
         loaded = true;
     }
@@ -225,6 +191,7 @@ void handle_break(uintptr_t addr) {
     long original = set_breakpoint(addr);
     breakpoints.push_back(addr);
     original_data.push_back(original);
+
 }
 
 void delete_break(size_t index) {
@@ -232,21 +199,25 @@ void delete_break(size_t index) {
         printf("** breakpoint %ld does not exist.\n", index);
         return;
     }
-    breakpoints[index] = 0; 
     long cur = ptrace(PTRACE_PEEKDATA, child_pid, breakpoints[index], NULL);
     ptrace(PTRACE_POKEDATA, child_pid, breakpoints[index], (cur & ~0xff) | original_data[index]);
     printf("** delete breakpoint %ld.\n", index);
+    breakpoints[index] = 0;
 }
 
 void handle_info_break() {
-    if (breakpoints.empty()) {
-        cout << "** no breakpoints." << endl;
+    bool no_break = true; 
+    for (size_t i=0; i<breakpoints.size(); i++){
+        if (breakpoints[i] != 0) no_break = false;
+    }
+    if (no_break) {
+        printf("** no breakpoints.\n");
         return;
     }
 
     cout << "Num\tAddress" << endl;
     for (size_t i = 0; i < breakpoints.size(); i++) {
-        if (breakpoints[i] == 0) continue; 
+        if (breakpoints[i] == 0) continue;
         cout << i << "\t0x" << hex << breakpoints[i] << endl;
     }
 }
@@ -258,46 +229,47 @@ void process_breakpoint(uintptr_t rip) {
     ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
 
     // find original instruction at breakpoint address and restore it
-    for (size_t i = 0; i < inst_count; i++) {
-        if (instructions[i].address == rip) {
-            long cur_binary = ptrace(PTRACE_PEEKDATA, child_pid, rip, NULL);
-            ptrace(PTRACE_POKEDATA, child_pid, rip, (cur_binary & ~0xff) | instructions[i].bytes[0]);
-            ptrace(PTRACE_SINGLESTEP, child_pid, NULL, NULL);
-            waitpid(child_pid, NULL, 0);
-            track = 1; 
-            bp = rip;  
-            regs.rip = rip; 
-
-            // cout << "RIP: " << hex << regs.rip << endl;
-            ptrace(PTRACE_SETREGS, child_pid, NULL, &regs);
-            
-            break; 
+    long cur_binary = ptrace(PTRACE_PEEKDATA, child_pid, rip, NULL);
+    for (size_t j = 0; j<breakpoints.size(); j++){
+        if (breakpoints[j] == rip){
+            ptrace(PTRACE_POKEDATA, child_pid, rip, (cur_binary & ~0xff) | original_data[j]);
+            break;
         }
     }
+    // ptrace(PTRACE_POKEDATA, child_pid, rip, (cur_binary & ~0xff) | instructions[i].bytes[0]);
+    ptrace(PTRACE_SINGLESTEP, child_pid, NULL, NULL);
+    waitpid(child_pid, NULL, 0);
+    track = 1;
+    bp = rip;
+    regs.rip = rip;
+
+    // cout << "RIP: " << hex << regs.rip << endl;
+    ptrace(PTRACE_SETREGS, child_pid, NULL, &regs);
+
     // cout << "RIP: " << hex << regs.rip << endl;
 }
 
-void check_breakpoint(){
+void check_breakpoint() {
     if (bp) {
-        if (track) track--; 
+        if (track)
+            track--;
         else {
             set_breakpoint(bp);
-            bp = 0; 
+            bp = 0;
         }
     }
 }
 
 void handle_patch(uintptr_t addr, uint64_t value, size_t len) {
-    uint64_t mask = (1ULL << (len * 8)) - 1; 
+    uint64_t mask = (1ULL << (len * 8)) - 1;
     long cur = ptrace(PTRACE_PEEKDATA, child_pid, addr, NULL);
     value = (cur & ~mask) | value;
     ptrace(PTRACE_POKEDATA, child_pid, addr, value);
-    save_instructions(entry_point); 
     printf("** patch memory at address 0x%lx.\n", addr);
     // check if the patch was a breakpoint
     for (size_t i = 0; i < len; i++) {
         if (((cur >> (i * 8)) & 0xFF) == 0xCC) {
-            set_breakpoint(addr + i); 
+            set_breakpoint(addr + i);
         }
     }
 }
@@ -318,12 +290,12 @@ void handle_si() {
         process_breakpoint(rip);
     }
     disassemble(rip, 5);
-    cur_addr = rip; 
+    cur_addr = rip;
 }
 
 void handle_cont() {
     check_breakpoint();
-    
+
     ptrace(PTRACE_CONT, child_pid, NULL, NULL);
     int status;
     waitpid(child_pid, &status, 0);
@@ -355,18 +327,18 @@ void handle_syscall() {
         ptrace(PTRACE_GETREGS, child_pid, NULL, &regs);
         // cout << "RIP: " << hex << regs.rip << endl;
         // cout << "regs.orig_rax: " << regs.orig_rax << endl;
-        if (regs.orig_rax > 300) { // breakpoint
-            process_breakpoint(regs.rip - 1); 
+        if (regs.orig_rax > 300) {  // breakpoint
+            process_breakpoint(regs.rip - 1);
             disassemble(regs.rip - 1, 5);
-        } else if (is_entering){ // entering syscall
+        } else if (is_entering) {  // entering syscall
             printf("** enter a syscall(%lld) at 0x%llx.\n", regs.orig_rax, regs.rip - 2);
             disassemble(regs.rip - 2, 5);
             is_entering = false;
-        } else { // leaving syscall
+        } else {  // leaving syscall
             printf("** leave a syscall(%lld) = %lld at 0x%llx.\n", regs.orig_rax, regs.rax, regs.rip - 2);
             disassemble(regs.rip - 2, 5);
             is_entering = true;
-        } 
+        }
     } else if (WIFEXITED(status)) {
         print_program_terminated();
     }

@@ -1,4 +1,4 @@
-./sdb
+../sdb
 si
 load ./hello
 si

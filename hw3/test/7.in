@@ -1,8 +1,0 @@
-./sdb ./hello
-break 0x401030
-break 0x401040
-syscall
-syscall
-cont
-syscall
-syscall

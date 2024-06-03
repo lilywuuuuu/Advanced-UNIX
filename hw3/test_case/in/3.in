@@ -1,4 +1,4 @@
-./sdb ./guess
+../sdb ./guess
 break 0x4010de
 cont
 1
